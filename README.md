@@ -50,10 +50,11 @@ monitor-switcher.exe -print
 - `-print` Print a human-readable summary of the current configuration.
 - `-debug` Enable debug output (use before `-save`/`-load`).
 - `-noidmatch` Disable adapter-ID matching (advanced).
+- `-v` Enable virtual desktop injection (advanced).
 
 ### Missing targets
 
-If a profile references a virtual target that is not currently present (for example, a disconnected VDD), the tool will warn and ignore that target. Missing real targets are still attempted so they can be reactivated if available.
+If a profile references a target that is not currently present, Windows may return an error. Virtual targets must be present for their paths to apply.
 
 ### Default profile location
 

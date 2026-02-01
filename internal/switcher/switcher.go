@@ -35,7 +35,7 @@ func SaveProfile(path string, debug bool) error {
 	return nil
 }
 
-func LoadProfile(path string, debug bool, noIDMatch bool) error {
+func LoadProfile(path string, debug bool, noIDMatch bool, virtualInject bool) error {
 	debugf(debug, "Loading profile from: %s", path)
 
 	prof, err := profile.Load(path)
@@ -86,24 +86,9 @@ func LoadProfile(path string, debug bool, noIDMatch bool) error {
 		}
 	}
 
-	if ensureDesktopImageModes(&paths, &modes, currentModes) {
-		debugf(debug, "Injected missing desktop image info from current configuration")
-	}
-
-	filteredPaths, filteredModes := paths, modes
-	missing := classifyMissingTargets(paths, modes, additional, currentModes, currentAdditional)
-	if len(missing.virtualDesc) > 0 {
-		for _, miss := range missing.virtualDesc {
-			fmt.Fprintf(os.Stderr, "Warning: missing virtual target ignored: %s\n", miss)
-		}
-		filteredPaths, filteredModes, _ = filterMissingTargets(paths, modes, additional, currentModes, currentAdditional, missing.virtualIDs)
-		if len(filteredPaths) == 0 {
-			return fmt.Errorf("no available targets to apply after filtering missing targets")
-		}
-	}
-	if len(missing.realDesc) > 0 {
-		for _, miss := range missing.realDesc {
-			fmt.Fprintf(os.Stderr, "Warning: missing target; attempting to apply full profile: %s\n", miss)
+	if virtualInject {
+		if ensureDesktopImageModes(&paths, &modes, currentModes) {
+			debugf(debug, "Injected missing desktop image info from current configuration")
 		}
 	}
 
@@ -112,7 +97,7 @@ func LoadProfile(path string, debug bool, noIDMatch bool) error {
 		flags |= ccd.SdcFlagsVirtualModeAware
 	}
 
-	if err := ccd.SetDisplayConfig(filteredPaths, filteredModes, flags); err != nil {
+	if err := ccd.SetDisplayConfig(paths, modes, flags); err != nil {
 		debugf(debug, "Primary SetDisplayConfig failed: %v", err)
 		if len(currentAdditional) > 0 && len(additional) > 0 {
 			debugf(debug, "Trying alternative matching method")
@@ -147,45 +132,12 @@ func LoadProfile(path string, debug bool, noIDMatch bool) error {
 				}
 			}
 
-			filteredPaths, filteredModes = paths, modes
-			missing = classifyMissingTargets(paths, modes, additional, currentModes, currentAdditional)
-			if len(missing.virtualDesc) > 0 {
-				for _, miss := range missing.virtualDesc {
-					fmt.Fprintf(os.Stderr, "Warning: missing virtual target ignored: %s\n", miss)
-				}
-				filteredPaths, filteredModes, _ = filterMissingTargets(paths, modes, additional, currentModes, currentAdditional, missing.virtualIDs)
-				if len(filteredPaths) == 0 {
-					return fmt.Errorf("no available targets to apply after filtering missing targets")
-				}
-			}
-			if len(missing.realDesc) > 0 {
-				for _, miss := range missing.realDesc {
-					fmt.Fprintf(os.Stderr, "Warning: missing target; attempting to apply full profile: %s\n", miss)
-				}
-			}
-
-			if err := ccd.SetDisplayConfig(filteredPaths, filteredModes, flags); err != nil {
+			if err := ccd.SetDisplayConfig(paths, modes, flags); err != nil {
 				if virtualAware {
 					mergedPaths, mergedModes, ok := mergeProfileWithCurrent(origPaths, origModes, currentPaths, currentModes)
 					if ok {
 						debugf(debug, "Trying virtual-mode merge fallback")
-						filteredPaths, filteredModes = mergedPaths, mergedModes
-						missing = classifyMissingTargets(mergedPaths, mergedModes, additional, currentModes, currentAdditional)
-						if len(missing.virtualDesc) > 0 {
-							for _, miss := range missing.virtualDesc {
-								fmt.Fprintf(os.Stderr, "Warning: missing virtual target ignored: %s\n", miss)
-							}
-							filteredPaths, filteredModes, _ = filterMissingTargets(mergedPaths, mergedModes, additional, currentModes, currentAdditional, missing.virtualIDs)
-							if len(filteredPaths) == 0 {
-								return fmt.Errorf("no available targets to apply after filtering missing targets")
-							}
-						}
-						if len(missing.realDesc) > 0 {
-							for _, miss := range missing.realDesc {
-								fmt.Fprintf(os.Stderr, "Warning: missing target; attempting to apply full profile: %s\n", miss)
-							}
-						}
-						if mergeErr := ccd.SetDisplayConfig(filteredPaths, filteredModes, flags); mergeErr == nil {
+						if mergeErr := ccd.SetDisplayConfig(mergedPaths, mergedModes, flags); mergeErr == nil {
 							return nil
 						} else {
 							debugf(debug, "Merge fallback failed: %v", mergeErr)
@@ -419,6 +371,10 @@ func ensureDesktopImageModes(paths *[]ccd.DisplayConfigPathInfo, modes *[]ccd.Di
 	return changed
 }
 
+func packTargetModeIndices(targetIdx int, desktopIdx int) uint32 {
+	return uint32(uint32(uint16(desktopIdx)) | (uint32(uint16(targetIdx)) << 16))
+}
+
 type modeKey struct {
 	infoType ccd.DisplayConfigModeInfoType
 	id       uint32
@@ -471,328 +427,4 @@ func mergeProfileWithCurrent(profilePaths []ccd.DisplayConfigPathInfo, profileMo
 	}
 
 	return paths, modes, true
-}
-
-type targetSignature struct {
-	id           uint32
-	devicePath   string
-	friendly     string
-	manufacturer uint16
-	product      uint16
-}
-
-type profileTargetInfo struct {
-	signature        targetSignature
-	outputTechnology ccd.DisplayConfigVideoOutputTechnology
-	videoStandard    uint32
-}
-
-type missingTargets struct {
-	virtualIDs  map[uint32]struct{}
-	virtualDesc []string
-	realDesc    []string
-}
-
-func filterMissingTargets(paths []ccd.DisplayConfigPathInfo, modes []ccd.DisplayConfigModeInfo, additional []ccd.MonitorAdditionalInfo, currentModes []ccd.DisplayConfigModeInfo, currentAdditional []ccd.MonitorAdditionalInfo, dropIDs map[uint32]struct{}) ([]ccd.DisplayConfigPathInfo, []ccd.DisplayConfigModeInfo, []string) {
-	currentTargets := collectCurrentTargets(currentModes, currentAdditional)
-	profileTargets := collectProfileTargets(modes, additional)
-
-	keepPath := make([]bool, len(paths))
-	missing := make([]string, 0)
-	for i, path := range paths {
-		target := profileTargets[path.TargetInfo.ID]
-		if targetPresent(target, currentTargets) {
-			keepPath[i] = true
-		} else {
-			desc := targetDescription(target)
-			if desc == "" {
-				desc = fmt.Sprintf("id %d", path.TargetInfo.ID)
-			}
-			missing = append(missing, desc)
-			if dropIDs == nil {
-				keepPath[i] = false
-				continue
-			}
-			if _, ok := dropIDs[path.TargetInfo.ID]; ok {
-				keepPath[i] = false
-			} else {
-				keepPath[i] = true
-			}
-			continue
-		}
-	}
-
-	filteredPaths := make([]ccd.DisplayConfigPathInfo, 0, len(paths))
-	for i, path := range paths {
-		if keepPath[i] {
-			filteredPaths = append(filteredPaths, path)
-		}
-	}
-
-	filteredModes, remap := remapModes(filteredPaths, modes)
-	if len(missing) > 0 {
-		mergeCurrentModesForRemaining(filteredModes, currentModes)
-	}
-	for i := range filteredPaths {
-		updatePathModeIndices(&filteredPaths[i], remap)
-	}
-
-	return filteredPaths, filteredModes, missing
-}
-
-func classifyMissingTargets(paths []ccd.DisplayConfigPathInfo, modes []ccd.DisplayConfigModeInfo, additional []ccd.MonitorAdditionalInfo, currentModes []ccd.DisplayConfigModeInfo, currentAdditional []ccd.MonitorAdditionalInfo) missingTargets {
-	currentTargets := collectCurrentTargets(currentModes, currentAdditional)
-	profileTargets := collectProfileTargets(modes, additional)
-	profileInfo := collectProfileTargetInfo(paths, modes, additional)
-
-	result := missingTargets{
-		virtualIDs:  make(map[uint32]struct{}),
-		virtualDesc: make([]string, 0),
-		realDesc:    make([]string, 0),
-	}
-	for _, path := range paths {
-		target := profileTargets[path.TargetInfo.ID]
-		if targetPresent(target, currentTargets) {
-			continue
-		}
-		desc := targetDescription(target)
-		if desc == "" {
-			desc = fmt.Sprintf("id %d", path.TargetInfo.ID)
-		}
-		if isVirtualProfileTarget(profileInfo[path.TargetInfo.ID]) {
-			result.virtualDesc = append(result.virtualDesc, desc)
-			result.virtualIDs[path.TargetInfo.ID] = struct{}{}
-		} else {
-			result.realDesc = append(result.realDesc, desc)
-		}
-	}
-	return result
-}
-
-func collectCurrentTargets(modes []ccd.DisplayConfigModeInfo, additional []ccd.MonitorAdditionalInfo) []targetSignature {
-	targets := make([]targetSignature, 0)
-	for i, mode := range modes {
-		if mode.InfoType != ccd.DisplayConfigModeInfoTypeTarget {
-			continue
-		}
-		var info ccd.MonitorAdditionalInfo
-		if i >= 0 && i < len(additional) {
-			info = additional[i]
-		}
-		targets = append(targets, targetSignature{
-			id:           mode.ID,
-			devicePath:   strings.ToLower(info.MonitorDevicePath),
-			friendly:     strings.ToLower(info.MonitorFriendlyDevice),
-			manufacturer: info.ManufactureID,
-			product:      info.ProductCodeID,
-		})
-	}
-	return targets
-}
-
-func collectProfileTargets(modes []ccd.DisplayConfigModeInfo, additional []ccd.MonitorAdditionalInfo) map[uint32]targetSignature {
-	targets := make(map[uint32]targetSignature)
-	for i, mode := range modes {
-		if mode.InfoType != ccd.DisplayConfigModeInfoTypeTarget {
-			continue
-		}
-		var info ccd.MonitorAdditionalInfo
-		if i >= 0 && i < len(additional) {
-			info = additional[i]
-		}
-		targets[mode.ID] = targetSignature{
-			id:           mode.ID,
-			devicePath:   strings.ToLower(info.MonitorDevicePath),
-			friendly:     strings.ToLower(info.MonitorFriendlyDevice),
-			manufacturer: info.ManufactureID,
-			product:      info.ProductCodeID,
-		}
-	}
-	return targets
-}
-
-func collectProfileTargetInfo(paths []ccd.DisplayConfigPathInfo, modes []ccd.DisplayConfigModeInfo, additional []ccd.MonitorAdditionalInfo) map[uint32]profileTargetInfo {
-	info := make(map[uint32]profileTargetInfo)
-	for i, mode := range modes {
-		if mode.InfoType != ccd.DisplayConfigModeInfoTypeTarget {
-			continue
-		}
-		var add ccd.MonitorAdditionalInfo
-		if i >= 0 && i < len(additional) {
-			add = additional[i]
-		}
-		info[mode.ID] = profileTargetInfo{
-			signature: targetSignature{
-				id:           mode.ID,
-				devicePath:   strings.ToLower(add.MonitorDevicePath),
-				friendly:     strings.ToLower(add.MonitorFriendlyDevice),
-				manufacturer: add.ManufactureID,
-				product:      add.ProductCodeID,
-			},
-			videoStandard: uint32(mode.TargetMode().TargetVideoSignalInfo.VideoStandard),
-		}
-	}
-	for _, path := range paths {
-		entry := info[path.TargetInfo.ID]
-		entry.outputTechnology = path.TargetInfo.OutputTechnology
-		if entry.signature.id == 0 {
-			entry.signature.id = path.TargetInfo.ID
-		}
-		info[path.TargetInfo.ID] = entry
-	}
-	return info
-}
-
-func isVirtualProfileTarget(info profileTargetInfo) bool {
-	if info.videoStandard == 65791 {
-		return true
-	}
-	if info.outputTechnology == ccd.DisplayConfigVideoOutputTechnologyIndirectVirtual || info.outputTechnology == ccd.DisplayConfigVideoOutputTechnologyIndirectWired {
-		return true
-	}
-	if strings.Contains(info.signature.friendly, "vdd") || strings.Contains(info.signature.friendly, "virtual") {
-		return true
-	}
-	return false
-}
-
-func targetPresent(target targetSignature, current []targetSignature) bool {
-	if target.id == 0 && target.devicePath == "" && target.friendly == "" {
-		return false
-	}
-	for _, cur := range current {
-		if target.id != 0 && cur.id == target.id {
-			return true
-		}
-		if target.devicePath != "" && cur.devicePath != "" && cur.devicePath == target.devicePath {
-			return true
-		}
-		if target.friendly != "" && cur.friendly != "" && cur.friendly == target.friendly {
-			if target.manufacturer != 0 || target.product != 0 {
-				if cur.manufacturer == target.manufacturer && cur.product == target.product {
-					return true
-				}
-				continue
-			}
-			return true
-		}
-	}
-	return false
-}
-
-func targetDescription(target targetSignature) string {
-	if target.friendly != "" {
-		return target.friendly
-	}
-	if target.devicePath != "" {
-		return target.devicePath
-	}
-	return ""
-}
-
-func remapModes(paths []ccd.DisplayConfigPathInfo, modes []ccd.DisplayConfigModeInfo) ([]ccd.DisplayConfigModeInfo, map[uint32]uint32) {
-	used := make(map[uint32]struct{})
-	for _, path := range paths {
-		sourceIdx := sourceModeIndex(path)
-		if sourceIdx != invalidModeIndex() {
-			used[uint32(sourceIdx)] = struct{}{}
-		}
-		targetIdx, desktopIdx := targetModeIndices(path)
-		if targetIdx != invalidModeIndex() {
-			used[uint32(targetIdx)] = struct{}{}
-		}
-		if desktopIdx != invalidModeIndex() {
-			used[uint32(desktopIdx)] = struct{}{}
-		}
-	}
-
-	remap := make(map[uint32]uint32)
-	filtered := make([]ccd.DisplayConfigModeInfo, 0, len(used))
-	for i, mode := range modes {
-		if _, ok := used[uint32(i)]; ok {
-			remap[uint32(i)] = uint32(len(filtered))
-			filtered = append(filtered, mode)
-		}
-	}
-	return filtered, remap
-}
-
-func mergeCurrentModesForRemaining(modes []ccd.DisplayConfigModeInfo, currentModes []ccd.DisplayConfigModeInfo) {
-	currentMap := make(map[modeKey]ccd.DisplayConfigModeInfo, len(currentModes))
-	for _, mode := range currentModes {
-		currentMap[modeKey{infoType: mode.InfoType, id: mode.ID}] = mode
-	}
-	for i := range modes {
-		if modes[i].InfoType != ccd.DisplayConfigModeInfoTypeSource && modes[i].InfoType != ccd.DisplayConfigModeInfoTypeDesktopImage {
-			continue
-		}
-		if cur, ok := currentMap[modeKey{infoType: modes[i].InfoType, id: modes[i].ID}]; ok {
-			switch modes[i].InfoType {
-			case ccd.DisplayConfigModeInfoTypeSource:
-				modes[i].SetSourceMode(*cur.SourceMode())
-			case ccd.DisplayConfigModeInfoTypeDesktopImage:
-				modes[i].SetDesktopImageInfo(*cur.DesktopImageInfo())
-			}
-		}
-	}
-}
-
-func updatePathModeIndices(path *ccd.DisplayConfigPathInfo, remap map[uint32]uint32) {
-	sourceIdx := sourceModeIndex(*path)
-	if sourceIdx != invalidModeIndex() {
-		if newIdx, ok := remap[uint32(sourceIdx)]; ok {
-			path.SourceInfo.ModeInfoIdx = uint32(newIdx)
-		}
-	}
-
-	targetIdx, desktopIdx := targetModeIndices(*path)
-	if path.Flags&uint32(ccd.DisplayConfigFlagPathSupportVirtualMode) != 0 {
-		if targetIdx != invalidModeIndex() {
-			if newIdx, ok := remap[uint32(targetIdx)]; ok {
-				targetIdx = int(newIdx)
-			}
-		}
-		if desktopIdx != invalidModeIndex() {
-			if newIdx, ok := remap[uint32(desktopIdx)]; ok {
-				desktopIdx = int(newIdx)
-			}
-		}
-		path.TargetInfo.ModeInfoIdx = packTargetModeIndices(targetIdx, desktopIdx)
-	} else {
-		if targetIdx != invalidModeIndex() {
-			if newIdx, ok := remap[uint32(targetIdx)]; ok {
-				path.TargetInfo.ModeInfoIdx = uint32(newIdx)
-			}
-		}
-	}
-}
-
-func sourceModeIndex(path ccd.DisplayConfigPathInfo) int {
-	if path.Flags&uint32(ccd.DisplayConfigFlagPathSupportVirtualMode) != 0 {
-		return int(uint16(path.SourceInfo.ModeInfoIdx & 0xFFFF))
-	}
-	return int(path.SourceInfo.ModeInfoIdx)
-}
-
-func targetModeIndices(path ccd.DisplayConfigPathInfo) (int, int) {
-	if path.Flags&uint32(ccd.DisplayConfigFlagPathSupportVirtualMode) != 0 {
-		targetIdx := int(uint16((path.TargetInfo.ModeInfoIdx >> 16) & 0xFFFF))
-		desktopIdx := int(uint16(path.TargetInfo.ModeInfoIdx & 0xFFFF))
-		return targetIdx, desktopIdx
-	}
-	return int(path.TargetInfo.ModeInfoIdx), invalidModeIndex()
-}
-
-func packTargetModeIndices(targetIdx int, desktopIdx int) uint32 {
-	if targetIdx == invalidModeIndex() {
-		targetIdx = 0xFFFF
-	}
-	if desktopIdx == invalidModeIndex() {
-		desktopIdx = 0xFFFF
-	}
-	return uint32(uint32(uint16(desktopIdx)) | (uint32(uint16(targetIdx)) << 16))
-}
-
-func invalidModeIndex() int {
-	return 0xFFFF
 }

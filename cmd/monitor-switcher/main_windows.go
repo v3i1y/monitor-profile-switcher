@@ -19,6 +19,7 @@ func main() {
 	args := os.Args[1:]
 	debug := false
 	noIDMatch := false
+	virtualInject := false
 	var commands []command
 
 	for _, arg := range args {
@@ -35,6 +36,11 @@ func main() {
 			noIDMatch = true
 			if debug {
 				fmt.Println("Disabled matching of adapter IDs")
+			}
+		case "-v":
+			virtualInject = true
+			if debug {
+				fmt.Println("Enabled virtual desktop injection")
 			}
 		case "-save":
 			commands = append(commands, command{kind: "save", value: value})
@@ -68,7 +74,7 @@ func main() {
 				fmt.Fprintln(os.Stderr, "Invalid -load argument:", err)
 				os.Exit(1)
 			}
-			if err := switcher.LoadProfile(path, debug, noIDMatch); err != nil {
+			if err := switcher.LoadProfile(path, debug, noIDMatch, virtualInject); err != nil {
 				fmt.Fprintln(os.Stderr, "Load failed:", err)
 				os.Exit(1)
 			}
@@ -96,6 +102,7 @@ func printUsage() {
 	fmt.Println("  -load:{file}        load and apply monitor configuration from file")
 	fmt.Println("  -debug              enable debug output (use before -load or -save)")
 	fmt.Println("  -noidmatch          disable matching of adapter IDs")
+	fmt.Println("  -v                  enable virtual desktop injection (advanced)")
 	fmt.Println("  -print              print current monitor configuration summary")
 	fmt.Println("")
 	fmt.Println("If {file} is a filename (no path), it is stored under:")
